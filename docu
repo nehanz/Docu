@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""
+docu - session logger with AI assistant
+Saves logs to: <save_dir>/<session_name>/commands.txt
+Also saves commands and their outputs to: <save_dir>/<session_name>/all.txt
+"""
+
+import argparse
+import os
+import re
+import shlex
+import subprocess
+import textwrap
+import sys
+import tty
+import termios
+import requests
+from pathlib import Path
+from typing import Optional
+
+# colors
+class Color:
+    RESET = "\033[0m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+    BOLD = "\033[1m"
+
+# active session tracking
+ACTIVE_SESSION_FILE = Path.home() / ".docu_active_session"
+
+
+def set_active_session(session_dir: Path):
+    with ACTIVE_SESSION_FILE.open("w") as f:
+        f.write(str(session_dir))
+
+def clear_active_session():
+    """Clear active session"""
+    if ACTIVE_SESSION_FILE.exists():
+        ACTIVE_SESSION_FILE.unlink()
+
+def get_active_session() -> Optional[Path]:
+    """Return currently active session path"""
+    if ACTIVE_SESSION_FILE.exists():
+        with ACTIVE_SESSION_FILE.open("r") as f:
+            path = Path(f.read().strip())
+        if path.exists():
+            return path
+    return None
+
+# utilities
+def get_last_number(log_path: Path) -> int:
+    if not log_path.exists():
+        return 0
+    maxn = 0
+    with log_path.open("r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            m = re.match(r'^\s*(\d+)\s+', line)
+            if m:
+                n = int(m.group(1))
+                if n > maxn:
+                    maxn = n
+    return maxn
+
+def date_for_log() -> str:
+    res = subprocess.run(
+        ["date", "+%a %b %e %I:%M:%S %p %Z %Y"],
+        capture_output=True, text=True
+    )
+    return res.stdout.strip()
+
+def recent_session(save_path: Path) -> Optional[Path]:
+    if not save_path.exists() or not save_path.is_dir():
+        return None
+    sessions = [d for d in save_path.iterdir() if d.is_dir()]
+    if not sessions:
+        return None
+    sessions.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    return sessions[0]
+
+def add_comment(comment: str, session_name: Optional[str], save_dir: str) -> int:
+
+    text = " ".join(comment)
+    active = get_active_session()
+    if not active:
+        print("No active docu session found.")
+        print("Start one using: docu start --name <session_name>")
+        exit(1)
+
+    save_path = Path(save_dir).expanduser().resolve()
+
+    active = get_active_session()
+    if active:
+        session_dir = active
+    elif session_name:
+        session_dir = save_path / session_name
+        if not session_dir.exists():
+            print(f"Session '{session_name}' not found in {save_path}")
+            return 1
+    else:
+        session_dir = recent_session(save_path)
+        if session_dir is None:
+            print(f"No previous sessions found in {save_path}")
+            return 1
+
+    log_file = session_dir / "commands.txt"
+    all_file = session_dir / "all.txt"
+    comment_line = f"# {text}\n"
+    try:
+        with log_file.open("a", encoding="utf-8") as lf:
+            lf.write(comment_line)
+        with all_file.open("a", encoding="utf-8") as af:
+            af.write(comment_line)
+    except Exception as e:
+        print(f"Failed to write comment: {e}")
+        return 1
+    return 0
+
+# Start Session
+def start_session(session_name: str, save_dir: str):
+    save_path = Path(save_dir).expanduser().resolve()
+    session_dir = save_path / session_name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    set_active_session(session_dir)
+
+    log_file = session_dir / "commands.txt"
+    all_file = session_dir / "all.txt"
+    last_number = get_last_number(log_file)
+
+    rcfile_path = session_dir / ".docu_rc"
+    quoted_log = shlex.quote(str(log_file))
+    quoted_all = shlex.quote(str(all_file))
+
+    rc_contents = fr"""# docu rcfile (auto-generated)
+
+if [ -f ~/.bashrc ]; then
+    source ~/.bashrc
+fi
+
+export LOG_FILE={quoted_log}
+export ALL_FILE={quoted_all}
+export DOCU_COUNTER={last_number}
+export DOCU_LAST_CMD=""
+export DOCU_LAST_CMD2=""
+export DOCU_SESSION_STARTED=0
+export DOCU_MASK=0
+
+docu() {{
+    if [[ "$1" == "mask" ]]; then
+        if [[ "$DOCU_MASK" -eq 0 ]]; then
+            export DOCU_MASK=1
+            echo -e "{Color.BOLD}{Color.RED}docu mask: Output logging is now OFF{Color.RESET}"
+        else
+            export DOCU_MASK=0
+            echo -e "{Color.BOLD}{Color.GREEN}docu mask: Output logging is now ON{Color.RESET}"
+        fi
+        return 0
+    fi
+    command docu "$@"
+}}
+
+log() {{
+    CMD=$(history 1 | sed "s/^ *[0-9]\+ *//")
+
+    if [[ "$CMD" == docu* ]]; then
+        return  
+    fi
+
+    if [[ "$CMD" != "exit" && "$CMD" != "" ]]; then
+        # Only log if cmd is correct
+        if [[ "$CMD" != "$DOCU_LAST_CMD" && "$CMD" != "$DOCU_LAST_CMD2" ]]; then
+            # Check if command exists
+            CMD_NAME=$(echo "$CMD" | awk '{{print $1}}')
+            if ! command -v "$CMD_NAME" >/dev/null 2>&1; then
+                return
+            fi
+            if [[ "$DOCU_SESSION_STARTED" -eq 0 ]]; then
+                echo "--- Session started at $(date "+%a %b %e %I:%M:%S %p %Z %Y") ---" >> "$LOG_FILE"
+                echo "--- Session started at $(date "+%a %b %e %I:%M:%S %p %Z %Y") ---" >> "$ALL_FILE"
+                export DOCU_SESSION_STARTED=1
+            fi
+            DOCU_COUNTER=$((DOCU_COUNTER + 1))
+            printf "%s  %s\n" "$DOCU_COUNTER" "$CMD" >> "$LOG_FILE"
+            export DOCU_LAST_CMD2="$DOCU_LAST_CMD"
+            export DOCU_LAST_CMD="$CMD"
+
+            if [[ "$DOCU_MASK" -eq 0 ]]; then
+                {{
+                    echo "### [$DOCU_COUNTER] $CMD"
+                    echo "--- Output ---"
+                    eval "$CMD"
+                    STATUS=$?
+                    echo "--- Exit code: $STATUS ---"
+                    echo ""
+                }} >> "$ALL_FILE" 2>&1
+            else
+                {{
+                    echo "### [$DOCU_COUNTER] $CMD"
+                    echo "--- Output masked ---"
+                    echo ""
+                }} >> "$ALL_FILE"
+            fi
+        fi
+    fi
+}}
+
+export PROMPT_COMMAND=log
+trap 'if [[ "$DOCU_SESSION_STARTED" -eq 1 ]]; then echo "--- Session ended at $(date "+%a %b %e %I:%M:%S %p %Z %Y") ---" >> "$LOG_FILE"; echo "--- Session ended at $(date "+%a %b %e %I:%M:%S %p %Z %Y") ---" >> "$ALL_FILE"; fi; command docu internal_clear_session' EXIT
+"""
+
+    rcfile_path.write_text(rc_contents, encoding="utf-8")
+    rcfile_path.chmod(0o600)
+
+    print(f"{Color.GREEN}Session '{session_name}' started{Color.RESET}")
+    print(f"{Color.GREEN}Logging to: {log_file}{Color.RESET}")
+    print(f"{Color.GREEN}Logging commands and output to: {all_file}{Color.RESET}")
+    print(f"{Color.RED}Type 'exit' to stop logging.{Color.RESET}")
+    print(f"{Color.CYAN}Use 'docu mask' inside a session to mask the output.{Color.RESET}")
+
+    bash_path = "/bin/bash"
+    if not Path(bash_path).exists():
+        bash_path = os.environ.get("SHELL", "/bin/sh")
+        print(f"/bin/bash not found, falling back to {bash_path}.")
+
+    try:
+        os.chdir(str(session_dir))
+    except FileNotFoundError:
+        os.chdir(str(Path.home()))
+
+    try:
+        subprocess.call([bash_path, "--rcfile", str(rcfile_path)])
+    finally:
+        for file in [log_file, all_file]:
+            if file.exists():
+                lines = file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                start_idx = None
+                for i in range(len(lines)-1, -1, -1):
+                    if lines[i].startswith("--- Session started at"):
+                        start_idx = i
+                        break
+                ended = any(ln.startswith("--- Session ended at") for ln in lines[start_idx+1:]) if start_idx is not None else False
+                if start_idx is not None and not ended:
+                    end_time = date_for_log()
+                    with file.open("a", encoding="utf-8") as lf:
+                        lf.write(f"--- Session ended at {end_time} ---\n")
+        clear_active_session()  # 🔹 clear session when exited
+
+    print(f"{Color.CYAN}Session saved to: {log_file}{Color.RESET}")
+    print(f"{Color.CYAN}Session (with output) saved to: {all_file}{Color.RESET}")
+
+def stop_session():
+    print("Sessions stop automatically when you exit the shell.")
+
+# AI Assistant
+def load_env(filepath='.env'):
+    if not os.path.exists(filepath):
+        print(f"\033[91mWarning:\033[0m {filepath} not found")
+        return
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if '=' in line:
+                key, value = line.split('=', 1)
+                key, value = key.strip(), value.strip()
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                elif value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1]
+                os.environ[key] = value
+
+def ai_response(prompt: str) -> str:
+    API_KEY = os.getenv("GEMINI_API_KEY")
+    API_URL = os.getenv("GEMINI_API_URL")
+    if not API_KEY or not API_URL:
+        return "[Error] Missing GEMINI_API_KEY or GEMINI_API_URL in .env"
+    headers = {"Content-Type": "application/json", "X-goog-api-key": API_KEY}
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
+    try:
+        response = requests.post(API_URL, headers=headers, json=data, timeout=60)
+        response.raise_for_status()
+        output = response.json()
+        return output["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        return f"[Error contacting Gemini] {e}"
+
+def multiline_input(prompt_msg):
+    print(prompt_msg)
+    print("(Shift+Enter for newline, Enter alone to submit)\n")
+    lines = []
+    while True:
+        try:
+            line = input()
+            if not line.strip() and lines:
+                break
+            lines.append(line)
+        except EOFError:
+            break
+    return "\n".join(lines).strip()
+
+def ask_ai():
+    session_path = get_active_session()
+    if not session_path:
+        print("No active docu session found.")
+        print("Start one using: docu start --name <session_name>")
+        return
+    load_env()
+    print("\033[96mDocu AI Assistant \033[0m")
+    print(f"(Active session: {session_path.name})\n")
+    user_prompt = multiline_input("Type your prompt:")
+    if not user_prompt:
+        print("No input provided. Exiting.")
+        return
+    print("\n⏳ Generating...\n")
+
+    context =  """You are Docu AI — an intelligent command-line assistant integrated into a terminal documentation tool.
+                You serve as a trusted DevOps, system administration, and cybersecurity helper.
+
+                Your mission:
+                Assist users with technical problem-solving — from DevOps automation to Capture The Flag (CTF) challenges — 
+                by providing accurate, concise, and actionable answers directly usable in a Linux terminal environment.
+
+                ---
+
+                ### 🧩 Your Knowledge Domains
+
+                You may assist with:
+                - Linux / UNIX administration, scripting, and troubleshooting.
+                - DevOps, CI/CD, containerization (Docker, Kubernetes, Jenkins, GitHub Actions).
+                - Network configuration, monitoring, and optimization.
+                - Web server management (Nginx, Apache, HAProxy).
+                - Firewall setup and security hardening (iptables, ufw, firewalld).
+                - Cloud and infrastructure deployments (AWS, Azure, GCP).
+                - Ethical cybersecurity and CTF-style challenges, such as:
+                - Privilege escalation on Linux/Windows (for learning or simulation)
+                - Reverse engineering, binary exploitation, and debugging tools (gdb, strings, ltrace, etc.)
+                - Web exploitation basics (SQLi, XSS, LFI, RCE concepts)
+                - Cryptography and steganography challenges (hash cracking, cipher decoding)
+                - Network analysis and packet inspection (Wireshark, tcpdump)
+                - Forensics (file recovery, metadata analysis)
+                - OSINT-style data gathering (open-source, non-intrusive methods)
+                - Writing or analyzing Bash/Python/YAML scripts.
+
+                You **must** focus on **educational and technical contexts only** — all examples and solutions are for 
+                learning, simulation, or legitimate testing within the user's own lab environments.
+
+                ---
+
+                ### Topics to Reject
+
+                You must **refuse or redirect** if the query is unrelated to technical or ethical security work.
+                Do NOT answer:
+                - Questions about people, emotions, politics, news, entertainment, or general knowledge.
+                - Any illegal hacking, real-world attack planning, or intrusion on unauthorized systems.
+                - Creative writing, storytelling, or personal topics (animals, jokes, etc.).
+
+                If such a request is made, respond:
+                "I'm specialized for DevOps, system engineering, and cybersecurity learning. Please ask a technical or educational question."
+
+                ---
+
+                ### Response Style Rules
+
+                Always format your output as if it will appear in a professional terminal log.
+
+                **Formatting rules:**
+                1. Use bullet points or numbered steps for clarity.
+                2. Use fenced code blocks (```) for commands, configs, or examples.
+                3. Prefer brevity — short explanations, clear instructions.
+                4. Always show **best practices** for performance, maintainability, and security.
+                5. Avoid unnecessary long paragraphs or redundant text.
+                6. When multiple options exist, show only the **most efficient and reliable one**.
+                7. Provide reasoning in one concise line when needed.
+                8. If a command might be risky or system-altering, clearly mark it as such.
+
+                **Output example:**
+                Enable UFW for SSH and HTTP
+                sudo ufw allow OpenSSH
+                sudo ufw allow 80/tcp
+                sudo ufw enable
+
+                markdown
+                Copy code
+
+                **CTF answer example:**
+                Extract hidden string from binary
+                strings binary_file | grep flag
+
+                pgsql
+                Copy code
+                Then explain in one or two lines what the command does.
+
+                ---
+
+                ### Behavior Summary
+
+                - Focus on DevOps + security problem-solving.
+                - Never generate irrelevant, creative, or social content.
+                - Always maintain a professional tone suitable for terminal or log outputs.
+                - Help efficiently — aim to save user time.
+                - If user input looks like terminal logs or CTF challenge output, analyze it and provide the most logical next steps.
+                - If unclear, ask short clarifying questions.
+
+                Your goal: **Help the user configure, fix, or solve technical challenges with accuracy and security best practices.**
+                """
+    
+    all_file = session_path / "all.txt"
+    if all_file.exists():
+        data = all_file.read_text(encoding="utf-8", errors="ignore")
+    else:
+        data = ""
+    prompt = context + "\n" + data + "\n" + user_prompt
+    answer = ai_response(prompt)
+    print("\033[92m=== Gemini Response ===\033[0m")
+    paragraphs = answer.split("\n\n")
+    for para in paragraphs:
+        if para.strip():
+            print(textwrap.fill(para.strip(), width=80))
+            print()
+    print("\033[92m" + "=" * 20 + "\033[0m\n")
+
+# CLI
+def main():
+    parser = argparse.ArgumentParser(prog="docu", description="Document your terminal sessions with AI Assist")
+    parser.add_argument("--comment", "-c", nargs="+", help="Add a comment on log file")
+    sub = parser.add_subparsers(dest="cmd", required=False)
+
+    p_start = sub.add_parser("start", help="Start a logging session")
+    p_start.add_argument("--name", "-n", required=True, help="Session name")
+    p_start.add_argument("--save", "-s", default="~/Documents/docu", help="Directory to save sessions")
+
+    sub.add_parser("stop", help="Stop session (informational)")
+    sub.add_parser("askai", help="Ask AI Assistant")
+    sub.add_parser("mask", help="Toggle output logging for sensitive commands")
+    sub.add_parser("internal_clear_session", help=argparse.SUPPRESS) 
+
+    args = parser.parse_args()
+
+    # Unified command handling
+    if args.cmd == "start":
+        start_session(args.name, args.save)
+    elif args.comment:
+        session_name = getattr(args, "name", None)
+        save_dir = getattr(args, "save", "~/Documents/docu")
+        add_comment(args.comment, session_name, save_dir)
+    elif args.cmd == "stop":
+        stop_session()
+    elif args.cmd == "askai":
+        ask_ai()
+    elif args.cmd == "mask":
+        print("Use 'docu mask' inside a session to mask the output")
+    elif args.cmd == "internal_clear_session":
+        clear_active_session()
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
