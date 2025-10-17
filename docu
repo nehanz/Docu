@@ -223,10 +223,10 @@ trap 'if [[ "$DOCU_SESSION_STARTED" -eq 1 ]]; then echo "--- Session ended at $(
         bash_path = os.environ.get("SHELL", "/bin/sh")
         print(f"/bin/bash not found, falling back to {bash_path}.")
 
-    try:
-        os.chdir(str(session_dir))
-    except FileNotFoundError:
-        os.chdir(str(Path.home()))
+    # try:
+    #     os.chdir(str(session_dir))
+    # except FileNotFoundError:
+    #     os.chdir(str(Path.home()))
 
     try:
         subprocess.call([bash_path, "--rcfile", str(rcfile_path)])
@@ -253,23 +253,58 @@ def stop_session():
     print("Sessions stop automatically when you exit the shell.")
 
 # AI Assistant
-def load_env(filepath='.env'):
-    if not os.path.exists(filepath):
-        print(f"\033[91mWarning:\033[0m {filepath} not found")
-        return
-    with open(filepath, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if '=' in line:
-                key, value = line.split('=', 1)
-                key, value = key.strip(), value.strip()
-                if value.startswith('"') and value.endswith('"'):
-                    value = value[1:-1]
-                elif value.startswith("'") and value.endswith("'"):
-                    value = value[1:-1]
-                os.environ[key] = value
+def load_env(filepath: Optional[str] = None) -> bool:
+    candidates = []
+    if filepath:
+        candidates.append(Path(filepath))
+    candidates.extend([
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent / ".env",
+        Path.home() / ".env",
+        Path.home() / "VSC" / "docu_tool" / ".env",
+    ])
+
+    # deduplicate while preserving order
+    seen = set()
+    paths = []
+    for p in candidates:
+        rp = p.resolve() if p.exists() else p
+        if str(rp) not in seen:
+            seen.add(str(rp))
+            paths.append(rp)
+
+    found = None
+    for p in paths:
+        if p.exists():
+            found = p
+            break
+
+    if not found:
+        tried = "\n".join(f" - {p}" for p in paths)
+        print(f"\033[91mWarning:\033[0m No .env found. Tried:\n{tried}")
+        return False
+
+    try:
+        with found.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].lstrip()
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if (value.startswith('"') and value.endswith('"')) or (
+                        value.startswith("'") and value.endswith("'")
+                    ):
+                        value = value[1:-1]
+                    os.environ[key] = value
+        return True
+    except Exception as e:
+        print(f"\033[91mError loading .env:\033[0m {e}")
+        return False
 
 def ai_response(prompt: str) -> str:
     API_KEY = os.getenv("GEMINI_API_KEY")
@@ -288,7 +323,7 @@ def ai_response(prompt: str) -> str:
 
 def multiline_input(prompt_msg):
     print(prompt_msg)
-    print("(Shift+Enter for newline, Enter alone to submit)\n")
+    print("(Shift+Enter for newline)\n")
     lines = []
     while True:
         try:
