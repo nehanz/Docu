@@ -25,7 +25,7 @@ Docu is a Python tool that logs terminal commands and outputs, lets you add comm
 ### From PyPI (recommended)
 
 ```bash
-pip install docu
+pip install docu-cli
 ```
 
 ### From source
