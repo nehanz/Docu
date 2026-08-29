@@ -16,7 +16,8 @@ except ImportError:
 PROVIDER_DEFAULTS = {
     "gemini": {
         "name": "Google Gemini",
-        "api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent",
+        "api_url": "https://generativelanguage.googleapis.com/v1beta",
+        "model_path": "models/gemini-3.6-flash:generateContent",
         "api_key_hint": "AIza...",
     },
     "openai": {
@@ -40,18 +41,22 @@ class AIResponse:
 
 class AIProvider(Protocol):
 
-    def chat(self, prompt: str) -> AIResponse:
+    def chat(self, prompt: str, timeout: int = 30) -> AIResponse:
         ...
 
 
 class GeminiProvider:
 
-    def __init__(self, api_key: str, api_url: str):
+    def __init__(self, api_key: str, api_url: str, model_path: str = ""):
         self.api_key = api_key
         self.api_url = api_url
+        self.model_path = model_path
 
-    def chat(self, prompt: str) -> AIResponse:
+    def chat(self, prompt: str, timeout: int = 30) -> AIResponse:
         import requests
+
+        # Build full URL from base + model path
+        full_url = f"{self.api_url}/{self.model_path}".rstrip("/")
 
         headers = {
             "Content-Type": "application/json",
@@ -60,12 +65,20 @@ class GeminiProvider:
         data = {"contents": [{"parts": [{"text": prompt}]}]}
 
         try:
-            response = requests.post(self.api_url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
+            response = requests.post(full_url, headers=headers, json=data, timeout=timeout)
+            if not response.ok:
+                try:
+                    err_json = response.json()
+                    msg = err_json.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Gemini API error ({response.status_code}): {msg}")
             output = response.json()
             text = output["candidates"][0]["content"]["parts"][0]["text"].strip()
             return AIResponse(text=text, provider="gemini")
         except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
             raise RuntimeError(f"Gemini API error: {e}")
 
 
@@ -75,7 +88,7 @@ class OpenAIProvider:
         self.api_key = api_key
         self.api_url = api_url
 
-    def chat(self, prompt: str) -> AIResponse:
+    def chat(self, prompt: str, timeout: int = 30) -> AIResponse:
         import requests
 
         headers = {
@@ -89,12 +102,20 @@ class OpenAIProvider:
         }
 
         try:
-            response = requests.post(self.api_url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
+            response = requests.post(self.api_url, headers=headers, json=data, timeout=timeout)
+            if not response.ok:
+                try:
+                    err_json = response.json()
+                    msg = err_json.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"OpenAI API error ({response.status_code}): {msg}")
             output = response.json()
             text = output["choices"][0]["message"]["content"].strip()
             return AIResponse(text=text, provider="openai")
         except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
             raise RuntimeError(f"OpenAI API error: {e}")
 
 
@@ -104,7 +125,7 @@ class AnthropicProvider:
         self.api_key = api_key
         self.api_url = api_url
 
-    def chat(self, prompt: str) -> AIResponse:
+    def chat(self, prompt: str, timeout: int = 30) -> AIResponse:
         import requests
 
         headers = {
@@ -119,12 +140,20 @@ class AnthropicProvider:
         }
 
         try:
-            response = requests.post(self.api_url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
+            response = requests.post(self.api_url, headers=headers, json=data, timeout=timeout)
+            if not response.ok:
+                try:
+                    err_json = response.json()
+                    msg = err_json.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Anthropic API error ({response.status_code}): {msg}")
             output = response.json()
             text = output["content"][0]["text"].strip()
             return AIResponse(text=text, provider="anthropic")
         except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
             raise RuntimeError(f"Anthropic API error: {e}")
 
 
@@ -149,11 +178,28 @@ def load_config() -> dict:
         return {}
 
 
-def save_config(config: dict) -> None:
-    import tomllib
+def dump_toml(data: dict) -> str:
+    lines = []
+    for k, v in data.items():
+        if not isinstance(v, dict):
+            lines.append(f'{k} = "{v}"')
+    for section, table in data.items():
+        if isinstance(table, dict):
+            lines.append(f"\n[{section}]")
+            for k, v in table.items():
+                if isinstance(v, str):
+                    val = v.replace("\\", "\\\\").replace('"', '\\"')
+                    lines.append(f'{k} = "{val}"')
+                elif isinstance(v, bool):
+                    lines.append(f'{k} = {"true" if v else "false"}')
+                elif isinstance(v, (int, float)):
+                    lines.append(f"{k} = {v}")
+    return "\n".join(lines).strip() + "\n"
 
+
+def save_config(config: dict) -> None:
     ensure_config_dir()
-    content = tomllib.dumps(config)
+    content = dump_toml(config)
     CONFIG_FILE.write_text(content, encoding="utf-8")
     CONFIG_FILE.chmod(0o600)
 
@@ -163,18 +209,20 @@ def get_provider(config: dict) -> Optional[AIProvider]:
         return None
 
     ai_config = config["ai"]
-    provider = ai_config.get("provider")
+    provider_name = ai_config.get("provider")
     api_key = ai_config.get("api_key")
     api_url = ai_config.get("api_url", "")
 
-    if not provider or not api_key:
+    if not provider_name or not api_key:
         return None
 
-    if provider == "gemini":
-        return GeminiProvider(api_key, api_url)
-    elif provider == "openai":
+    if provider_name == "gemini":
+        # Get model_path from defaults or config
+        model_path = ai_config.get("model_path", PROVIDER_DEFAULTS["gemini"]["model_path"])
+        return GeminiProvider(api_key, api_url, model_path)
+    elif provider_name == "openai":
         return OpenAIProvider(api_key, api_url)
-    elif provider == "anthropic":
+    elif provider_name == "anthropic":
         return AnthropicProvider(api_key, api_url)
 
     return None
@@ -210,8 +258,7 @@ def prompt_input(prompt_text: str, default: str = "", password: bool = False) ->
 
     while True:
         if password:
-            import getpass
-            value = getpass.getpass(prompt + ": ")
+            value = _password_input(prompt)
         else:
             value = input(prompt + ": ")
 
@@ -221,6 +268,46 @@ def prompt_input(prompt_text: str, default: str = "", password: bool = False) ->
         if default:
             return default
         print("This field is required. Try again.")
+
+
+def _password_input(prompt: str) -> str:
+    """Get password input with visual dots feedback."""
+    import sys
+    print(prompt + ": ", end="", flush=True)
+    sys.stdout.flush()
+
+    # Read character by character and print dots
+    chars = []
+    import tty
+    import termios
+
+    try:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setraw(sys.stdin)
+
+        while True:
+            ch = sys.stdin.read(1)
+            if ch == '\n' or ch == '\r':
+                print()  # New line after Enter
+                break
+            if ch == '\x03':  # Ctrl+C
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                raise KeyboardInterrupt
+            if ch == '\x7f' or ch == '\b':  # Backspace
+                if chars:
+                    chars.pop()
+                    # Erase last dot (go back, space, go back)
+                    sys.stdout.write('\b \b')
+                    sys.stdout.flush()
+            else:
+                chars.append(ch)
+                sys.stdout.write('*')
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    return ''.join(chars)
 
 
 def run_setup(interactive: bool = True) -> Optional[dict]:
@@ -238,7 +325,6 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
     api_url = info["api_url"]
 
     print(f"\n[{info['name']}]")
-    print(f"API URL: {api_url}")
     print(f"API Key format: {info['api_key_hint']}")
     print()
 
@@ -258,14 +344,26 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
     print("\nTesting connection...")
     try:
         ai_provider = get_provider_from_config(provider, api_key, api_url)
-        response = ai_provider.chat("Hello")
-        print("[+] Connection successful!")
+        response = ai_provider.chat("Hello", timeout=8)
+        print("Connection successful!")
     except Exception as e:
-        print(f"[-] Connection failed: {e}")
-        print("\nTips:")
-        print("  - Make sure your API key is correct")
-        print("  - Check if the API service is available")
-        print("  - Verify your account has access to the API")
+        error_msg = str(e)
+        # Check for common issues
+        if "401" in error_msg or "API key" in error_msg.lower():
+            msg = "Invalid API key. Check your credentials and try again."
+        elif "404" in error_msg:
+            msg = "API endpoint not found. The service may have changed."
+        elif "429" in error_msg:
+            msg = "Rate limited. Wait a moment and retry."
+        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            msg = "Connection timed out. Check your internet connection."
+        elif "connection" in error_msg.lower() or "network" in error_msg.lower():
+            msg = "Network error. Check your internet connection."
+        else:
+            msg = f"An error occurred: {error_msg[:100]}"
+
+        print(f"[-] Connection failed: {msg}")
+
         retry = input("\nRetry? (y/N): ").strip().lower()
         if retry == "y" or retry == "yes":
             return run_setup(True)
@@ -287,7 +385,8 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
 
 def get_provider_from_config(provider: str, api_key: str, api_url: str) -> AIProvider:
     if provider == "gemini":
-        return GeminiProvider(api_key, api_url)
+        model_path = PROVIDER_DEFAULTS["gemini"]["model_path"]
+        return GeminiProvider(api_key, api_url, model_path)
     elif provider == "openai":
         return OpenAIProvider(api_key, api_url)
     elif provider == "anthropic":

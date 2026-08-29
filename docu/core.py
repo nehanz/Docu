@@ -292,7 +292,7 @@ def get_ai_provider() -> Optional[AIProvider]:
 
     return provider
 
-def ask_ai():
+def ask_ai(inline_prompt: Optional[str] = None):
     session_path = get_active_session()
     if not session_path:
         print("No active docu session found.")
@@ -306,7 +306,13 @@ def ask_ai():
 
     print("\033[96mDocu AI Assistant\033[0m")
     print(f"(Active session: {session_path.name})\n")
-    user_prompt = multiline_input("Type your prompt:")
+
+    if inline_prompt:
+        user_prompt = inline_prompt.strip()
+        print(f"Prompt: {user_prompt}")
+    else:
+        user_prompt = multiline_input("Type your prompt:")
+
     if not user_prompt:
         print("No input provided. Exiting.")
         return
@@ -467,7 +473,8 @@ def main():
     p_start.add_argument("--save", "-s", default="~/Documents/docu", help="Directory to save sessions")
 
     sub.add_parser("stop", help="Stop session (informational)")
-    sub.add_parser("askai", help="Ask AI Assistant")
+    p_askai = sub.add_parser("askai", help="Ask AI Assistant")
+    p_askai.add_argument("prompt", nargs="*", help="Optional prompt to ask AI directly")
     sub.add_parser("mask", help="Toggle output logging for sensitive commands")
     sub.add_parser("config", help="Configure AI settings")
     sub.add_parser("internal_clear_session", help=argparse.SUPPRESS)
@@ -484,7 +491,8 @@ def main():
     elif args.cmd == "stop":
         stop_session()
     elif args.cmd == "askai":
-        ask_ai()
+        prompt_text = " ".join(args.prompt) if getattr(args, "prompt", None) else None
+        ask_ai(prompt_text)
     elif args.cmd == "config":
         config_cmd()
     elif args.cmd == "mask":
