@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "docu"
+name = "docu-cli"
 version = "0.1.2"
 description = "Terminal session logger with AI assistant"
 readme = "README.md"
