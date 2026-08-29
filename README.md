@@ -12,6 +12,14 @@ Docu is a Python tool that logs terminal commands and outputs, lets you add comm
 
 ---
 
+## Prerequisites & Requirements
+
+- **Operating System**: Linux, macOS, or WSL (requires standard `script` utility)
+- **Python**: `>= 3.8`
+- **Dependencies**: `requests` (installed automatically)
+
+---
+
 ## Installation
 
 ### From PyPI (recommended)
@@ -46,7 +54,17 @@ docu start --name session_name
 
 2. **Use the terminal normally** — all commands and outputs are logged.
 
-3. **Type `exit`** to stop logging and save your session.
+3. **Ask AI anytime:**
+
+```bash
+# Inline prompt
+docu askai "How do I check open ports in Linux?"
+
+# Or interactive mode
+docu askai
+```
+
+4. **Type `exit`** to stop logging and save your session.
 
 ---
 
@@ -55,20 +73,20 @@ docu start --name session_name
 | Command | Description |
 |---------|-------------|
 | `docu start -n <name>` | Start a new logging session |
+| `docu askai [prompt]` | Ask AI assistant directly or interactively |
+| `docu config` | Configure AI settings and model selection |
 | `docu --comment "note"` | Add a comment to the current session |
-| `docu askai` | Ask the AI assistant a question |
-| `docu config` | Configure AI settings (first-time setup) |
 | `docu mask` | Toggle output masking (use inside a session) |
 
 ---
 
 ## AI Setup
 
-On first run of `docu askai`, you'll be guided through interactive setup:
+On first run of `docu askai` or `docu config`, you'll be guided through interactive setup:
 
 1. Choose a provider (Gemini, OpenAI, or Anthropic)
-2. Enter your API URL (defaults provided)
-3. Enter your API key (hidden input)
+2. Get your API key from the provider's dashboard (links provided)
+3. Enter your API key (shown as `*` as you type)
 
 Your config is saved to `~/.docu/config.toml` (mode 600).
 
@@ -84,22 +102,23 @@ If you skip setup, you'll be prompted again when using `docu askai`.
 ~/.docu/config.toml
 ```
 
+### Supported providers
+
+| Provider | Default API URL | Default Model |
+|----------|-----------------|---------------|
+| Gemini | `https://generativelanguage.googleapis.com/v1beta` | `models/gemini-3.6-flash:generateContent` |
+| OpenAI | `https://api.openai.com/v1/chat/completions` | `gpt-4o-mini` |
+| Anthropic | `https://api.anthropic.com/v1/messages` | `claude-3-5-sonnet-20241022` |
+
 ### Manual config example
 
 ```toml
 [ai]
 provider = "openai"
 api_url = "https://api.openai.com/v1/chat/completions"
+model = "gpt-4o-mini"
 api_key = "sk-..."
 ```
-
-### Supported providers
-
-| Provider | Default API URL |
-|----------|-----------------|
-| Gemini | `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent` |
-| OpenAI | `https://api.openai.com/v1/chat/completions` |
-| Anthropic | `https://api.anthropic.com/v1/messages` |
 
 ---
 
