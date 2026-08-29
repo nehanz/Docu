@@ -437,9 +437,9 @@ def config_cmd():
         print("\n=== Current AI Configuration ===\n")
         ai = config["ai"]
         provider_name = ai.get("provider", "unknown")
-        masked_key = ai.get("api_key", "")[:8] + "***" if ai.get("api_key") else "not set"
+        has_key = bool(ai.get("api_key"))
         print(f"Provider: {provider_name}")
-        print(f"API Key: {masked_key}")
+        print(f"API Key: {'[set]' if has_key else '[not set]'}")
         print(f"API URL: {ai.get('api_url', 'not set')}")
 
         print("\nOptions:")
