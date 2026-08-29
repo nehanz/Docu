@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docu"
+version = "0.1.2"
+description = "Terminal session logger with AI assistant"
+readme = "README.md"
+authors = [{ name = "Nehan Wijayagunarathna", email = "nehan.wgy@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.28.0",
+    "tomli>=2.0.0; python_version < '3.11'",
+]
+
+[project.scripts]
+docu = "docu.core:main"
+
+[tool.setuptools]
+packages = ["docu"]
+
+[tool.setuptools.package-data]
+docu = ["py.typed"]
