@@ -17,17 +17,19 @@ PROVIDER_DEFAULTS = {
     "gemini": {
         "name": "Google Gemini",
         "api_url": "https://generativelanguage.googleapis.com/v1beta",
-        "model_path": "models/gemini-3.6-flash:generateContent",
+        "model": "models/gemini-3.6-flash:generateContent",
         "api_key_hint": "AIza...",
     },
     "openai": {
         "name": "OpenAI GPT",
         "api_url": "https://api.openai.com/v1/chat/completions",
+        "model": "gpt-4o-mini",
         "api_key_hint": "sk-...",
     },
     "anthropic": {
         "name": "Anthropic Claude",
         "api_url": "https://api.anthropic.com/v1/messages",
+        "model": "claude-3-5-sonnet-20241022",
         "api_key_hint": "sk-ant-api03-...",
     },
 }
@@ -47,16 +49,21 @@ class AIProvider(Protocol):
 
 class GeminiProvider:
 
-    def __init__(self, api_key: str, api_url: str, model_path: str = ""):
+    def __init__(self, api_key: str, api_url: str, model: str = ""):
         self.api_key = api_key
         self.api_url = api_url
-        self.model_path = model_path
+        self.model = model or PROVIDER_DEFAULTS["gemini"]["model"]
 
     def chat(self, prompt: str, timeout: int = 30) -> AIResponse:
         import requests
 
-        # Build full URL from base + model path
-        full_url = f"{self.api_url}/{self.model_path}".rstrip("/")
+        model_path = self.model
+        if not model_path.startswith("models/") and ":" not in model_path:
+            model_path = f"models/{model_path}:generateContent"
+        elif not model_path.endswith(":generateContent") and ":" not in model_path:
+            model_path = f"{model_path}:generateContent"
+
+        full_url = f"{self.api_url}/{model_path}".rstrip("/")
 
         headers = {
             "Content-Type": "application/json",
@@ -84,9 +91,10 @@ class GeminiProvider:
 
 class OpenAIProvider:
 
-    def __init__(self, api_key: str, api_url: str):
+    def __init__(self, api_key: str, api_url: str, model: str = ""):
         self.api_key = api_key
         self.api_url = api_url
+        self.model = model or PROVIDER_DEFAULTS["openai"]["model"]
 
     def chat(self, prompt: str, timeout: int = 30) -> AIResponse:
         import requests
@@ -96,7 +104,7 @@ class OpenAIProvider:
             "Authorization": f"Bearer {self.api_key}",
         }
         data = {
-            "model": "gpt-4o-mini",
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4096,
         }
@@ -121,9 +129,10 @@ class OpenAIProvider:
 
 class AnthropicProvider:
 
-    def __init__(self, api_key: str, api_url: str):
+    def __init__(self, api_key: str, api_url: str, model: str = ""):
         self.api_key = api_key
         self.api_url = api_url
+        self.model = model or PROVIDER_DEFAULTS["anthropic"]["model"]
 
     def chat(self, prompt: str, timeout: int = 30) -> AIResponse:
         import requests
@@ -134,7 +143,7 @@ class AnthropicProvider:
             "anthropic-version": "2023-06-01",
         }
         data = {
-            "model": "claude-sonnet-4-20250514",
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4096,
         }
@@ -212,20 +221,12 @@ def get_provider(config: dict) -> Optional[AIProvider]:
     provider_name = ai_config.get("provider")
     api_key = ai_config.get("api_key")
     api_url = ai_config.get("api_url", "")
+    model = ai_config.get("model") or ai_config.get("model_path", "")
 
     if not provider_name or not api_key:
         return None
 
-    if provider_name == "gemini":
-        # Get model_path from defaults or config
-        model_path = ai_config.get("model_path", PROVIDER_DEFAULTS["gemini"]["model_path"])
-        return GeminiProvider(api_key, api_url, model_path)
-    elif provider_name == "openai":
-        return OpenAIProvider(api_key, api_url)
-    elif provider_name == "anthropic":
-        return AnthropicProvider(api_key, api_url)
-
-    return None
+    return get_provider_from_config(provider_name, api_key, api_url, model)
 
 
 def is_configured(config: dict) -> bool:
@@ -323,6 +324,7 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
 
     info = PROVIDER_DEFAULTS[provider]
     api_url = info["api_url"]
+    default_model = info["model"]
 
     print(f"\n[{info['name']}]")
     print(f"API Key format: {info['api_key_hint']}")
@@ -340,19 +342,27 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
 
     api_key = prompt_input("Paste your API key here", password=True)
 
+    # Prompt for Model
+    print()
+    print(f"Default model: {default_model}")
+    model_input = input("Enter model name (Press Enter for default): ").strip()
+    model = model_input if model_input else default_model
+
     # Test connection
     print("\nTesting connection...")
     try:
-        ai_provider = get_provider_from_config(provider, api_key, api_url)
+        ai_provider = get_provider_from_config(provider, api_key, api_url, model)
         response = ai_provider.chat("Hello", timeout=8)
         print("Connection successful!")
     except Exception as e:
         error_msg = str(e)
         # Check for common issues
-        if "401" in error_msg or "API key" in error_msg.lower():
+        if "quota" in error_msg.lower() or "credit" in error_msg.lower() or "insufficient" in error_msg.lower():
+            msg = "API credit balance exhausted or quota exceeded. Check your billing settings."
+        elif "401" in error_msg or "invalid_api_key" in error_msg.lower():
             msg = "Invalid API key. Check your credentials and try again."
         elif "404" in error_msg:
-            msg = "API endpoint not found. The service may have changed."
+            msg = "API endpoint or model not found. Check the model name and try again."
         elif "429" in error_msg:
             msg = "Rate limited. Wait a moment and retry."
         elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
@@ -375,6 +385,7 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
         "provider": provider,
         "api_url": api_url,
         "api_key": api_key,
+        "model": model,
     }
     save_config(config)
     print(f"\n[+] Configuration saved to {CONFIG_FILE}")
@@ -383,12 +394,14 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
     return config
 
 
-def get_provider_from_config(provider: str, api_key: str, api_url: str) -> AIProvider:
+def get_provider_from_config(provider: str, api_key: str, api_url: str, model: str = "") -> AIProvider:
+    default_model = PROVIDER_DEFAULTS.get(provider, {}).get("model", "")
+    chosen_model = model or default_model
+
     if provider == "gemini":
-        model_path = PROVIDER_DEFAULTS["gemini"]["model_path"]
-        return GeminiProvider(api_key, api_url, model_path)
+        return GeminiProvider(api_key, api_url, chosen_model)
     elif provider == "openai":
-        return OpenAIProvider(api_key, api_url)
+        return OpenAIProvider(api_key, api_url, chosen_model)
     elif provider == "anthropic":
-        return AnthropicProvider(api_key, api_url)
+        return AnthropicProvider(api_key, api_url, chosen_model)
     raise ValueError(f"Unknown provider: {provider}")
