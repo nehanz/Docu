@@ -228,15 +228,6 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
         return None
 
     print("\n=== Docu AI Configuration ===\n")
-    print("To use AI features, you need to configure an API provider.")
-    print("You can skip this now and configure later with: docu config\n")
-
-    # Prompt to continue or skip
-    choice = input("Set up AI now? (y/N): ").strip().lower()
-    if choice != "y" and choice != "yes":
-        print("Skipping AI configuration.")
-        print("Run 'docu config' later to set up AI features.")
-        return None
 
     # Choose provider
     providers = list(PROVIDER_DEFAULTS.keys())
@@ -244,13 +235,24 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
     provider = prompt_choice("Choose AI provider:", providers, labels)
 
     info = PROVIDER_DEFAULTS[provider]
-    print(f"\nSelected: {info['name']}")
-    print(f"API URL: {info['api_url']}")
-    print(f"API Key format: {info['api_key_hint']}")
+    api_url = info["api_url"]
 
-    # Get API key
-    api_url = prompt_input("API URL", info["api_url"])
-    api_key = prompt_input("Enter your API key", password=True)
+    print(f"\n[{info['name']}]")
+    print(f"API URL: {api_url}")
+    print(f"API Key format: {info['api_key_hint']}")
+    print()
+
+    # Get API key with clear instructions
+    print("Get your API key from:")
+    if provider == "gemini":
+        print("  -> https://aistudio.google.com/app/apikey")
+    elif provider == "openai":
+        print("  -> https://platform.openai.com/api-keys")
+    elif provider == "anthropic":
+        print("  -> https://console.anthropic.com/settings/keys")
+    print()
+
+    api_key = prompt_input("Paste your API key here", password=True)
 
     # Test connection
     print("\nTesting connection...")
@@ -260,7 +262,11 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
         print("[+] Connection successful!")
     except Exception as e:
         print(f"[-] Connection failed: {e}")
-        retry = input("Retry with different settings? (y/N): ").strip().lower()
+        print("\nTips:")
+        print("  - Make sure your API key is correct")
+        print("  - Check if the API service is available")
+        print("  - Verify your account has access to the API")
+        retry = input("\nRetry? (y/N): ").strip().lower()
         if retry == "y" or retry == "yes":
             return run_setup(True)
         print("Configuration saved but not verified.")
@@ -274,7 +280,7 @@ def run_setup(interactive: bool = True) -> Optional[dict]:
     }
     save_config(config)
     print(f"\n[+] Configuration saved to {CONFIG_FILE}")
-    print("You can now use 'docu askai' to access the AI assistant.")
+    print("Use 'docu askai' to talk to the AI assistant.")
 
     return config
 
