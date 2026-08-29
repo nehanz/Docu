@@ -14,9 +14,17 @@ import textwrap
 import sys
 import tty
 import termios
-import requests
 from pathlib import Path
 from typing import Optional
+
+from .config import (
+    load_config,
+    save_config,
+    get_provider,
+    is_configured,
+    run_setup,
+    AIProvider,
+)
 
 # colors
 class Color:
@@ -36,12 +44,10 @@ def set_active_session(session_dir: Path):
         f.write(str(session_dir))
 
 def clear_active_session():
-    """Clear active session"""
     if ACTIVE_SESSION_FILE.exists():
         ACTIVE_SESSION_FILE.unlink()
 
 def get_active_session() -> Optional[Path]:
-    """Return currently active session path"""
     if ACTIVE_SESSION_FILE.exists():
         with ACTIVE_SESSION_FILE.open("r") as f:
             path = Path(f.read().strip())
@@ -164,7 +170,7 @@ log() {{
     CMD=$(history 1 | sed "s/^ *[0-9]\+ *//")
 
     if [[ "$CMD" == docu* ]]; then
-        return  
+        return
     fi
 
     if [[ "$CMD" != "exit" && "$CMD" != "" ]]; then
@@ -223,11 +229,6 @@ trap 'if [[ "$DOCU_SESSION_STARTED" -eq 1 ]]; then echo "--- Session ended at $(
         bash_path = os.environ.get("SHELL", "/bin/sh")
         print(f"/bin/bash not found, falling back to {bash_path}.")
 
-    # try:
-    #     os.chdir(str(session_dir))
-    # except FileNotFoundError:
-    #     os.chdir(str(Path.home()))
-
     try:
         subprocess.call([bash_path, "--rcfile", str(rcfile_path)])
     finally:
@@ -244,7 +245,7 @@ trap 'if [[ "$DOCU_SESSION_STARTED" -eq 1 ]]; then echo "--- Session ended at $(
                     end_time = date_for_log()
                     with file.open("a", encoding="utf-8") as lf:
                         lf.write(f"--- Session ended at {end_time} ---\n")
-        clear_active_session()  # 🔹 clear session when exited
+        clear_active_session()
 
     print(f"{Color.CYAN}Session saved to: {log_file}{Color.RESET}")
     print(f"{Color.CYAN}Session (with output) saved to: {all_file}{Color.RESET}")
@@ -253,74 +254,6 @@ def stop_session():
     print("Sessions stop automatically when you exit the shell.")
 
 # AI Assistant
-def load_env(filepath: Optional[str] = None) -> bool:
-    candidates = []
-    if filepath:
-        candidates.append(Path(filepath))
-    candidates.extend([
-        Path.cwd() / ".env",
-        Path(__file__).resolve().parent / ".env",
-        Path.home() / ".env",
-        Path.home() / "VSC" / "docu_tool" / ".env",
-    ])
-
-    # deduplicate while preserving order
-    seen = set()
-    paths = []
-    for p in candidates:
-        rp = p.resolve() if p.exists() else p
-        if str(rp) not in seen:
-            seen.add(str(rp))
-            paths.append(rp)
-
-    found = None
-    for p in paths:
-        if p.exists():
-            found = p
-            break
-
-    if not found:
-        tried = "\n".join(f" - {p}" for p in paths)
-        print(f"\033[91mWarning:\033[0m No .env found. Tried:\n{tried}")
-        return False
-
-    try:
-        with found.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export ") :].lstrip()
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    key = key.strip()
-                    value = value.strip()
-                    if (value.startswith('"') and value.endswith('"')) or (
-                        value.startswith("'") and value.endswith("'")
-                    ):
-                        value = value[1:-1]
-                    os.environ[key] = value
-        return True
-    except Exception as e:
-        print(f"\033[91mError loading .env:\033[0m {e}")
-        return False
-
-def ai_response(prompt: str) -> str:
-    API_KEY = os.getenv("GEMINI_API_KEY")
-    API_URL = os.getenv("GEMINI_API_URL")
-    if not API_KEY or not API_URL:
-        return "[Error] Missing GEMINI_API_KEY or GEMINI_API_URL in .env"
-    headers = {"Content-Type": "application/json", "X-goog-api-key": API_KEY}
-    data = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        response = requests.post(API_URL, headers=headers, json=data, timeout=60)
-        response.raise_for_status()
-        output = response.json()
-        return output["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:
-        return f"[Error contacting Gemini] {e}"
-
 def multiline_input(prompt_msg):
     print(prompt_msg)
     print("(Shift+Enter for newline)\n")
@@ -335,126 +268,199 @@ def multiline_input(prompt_msg):
             break
     return "\n".join(lines).strip()
 
-def ask_ai():
+def get_ai_provider() -> Optional[AIProvider]:
+    """Get AI provider, prompting setup if not configured."""
+    config = load_config()
+    provider = get_provider(config)
+
+    if provider is None:
+        print("\n" + "=" * 40)
+        print("AI features require configuration.")
+        print("=" * 40)
+        print("\nTo use AI features, you need to set up an API key.")
+        print("Choose a provider (Google Gemini, OpenAI GPT, or Anthropic Claude).\n")
+
+        config = run_setup(interactive=True)
+        if config is None:
+            print("\nAI configuration skipped.")
+            return None
+
+        provider = get_provider(config)
+        if provider is None:
+            print("Failed to configure AI provider.")
+            return None
+
+    return provider
+
+def ask_ai(inline_prompt: Optional[str] = None):
     session_path = get_active_session()
     if not session_path:
         print("No active docu session found.")
         print("Start one using: docu start --name <session_name>")
         return
-    load_env()
-    print("\033[96mDocu AI Assistant \033[0m")
+
+    provider = get_ai_provider()
+    if provider is None:
+        print("AI not configured. Run 'docu config' to set up AI features.")
+        return
+
+    print("\033[96mDocu AI Assistant\033[0m")
     print(f"(Active session: {session_path.name})\n")
-    user_prompt = multiline_input("Type your prompt:")
+
+    if inline_prompt:
+        user_prompt = inline_prompt.strip()
+        print(f"Prompt: {user_prompt}")
+    else:
+        user_prompt = multiline_input("Type your prompt:")
+
     if not user_prompt:
         print("No input provided. Exiting.")
         return
-    print("\n⏳ Generating...\n")
+    print("\nGenerating...\n")
 
-    context =  """You are Docu AI — an intelligent command-line assistant integrated into a terminal documentation tool.
-                You serve as a trusted DevOps, system administration, and cybersecurity helper.
-
-                Your mission:
-                Assist users with technical problem-solving — from DevOps automation to Capture The Flag (CTF) challenges — 
-                by providing accurate, concise, and actionable answers directly usable in a Linux terminal environment.
-
-                ---
-
-                ### 🧩 Your Knowledge Domains
-
-                You may assist with:
-                - Linux / UNIX administration, scripting, and troubleshooting.
-                - DevOps, CI/CD, containerization (Docker, Kubernetes, Jenkins, GitHub Actions).
-                - Network configuration, monitoring, and optimization.
-                - Web server management (Nginx, Apache, HAProxy).
-                - Firewall setup and security hardening (iptables, ufw, firewalld).
-                - Cloud and infrastructure deployments (AWS, Azure, GCP).
-                - Ethical cybersecurity and CTF-style challenges, such as:
-                - Privilege escalation on Linux/Windows (for learning or simulation)
-                - Reverse engineering, binary exploitation, and debugging tools (gdb, strings, ltrace, etc.)
-                - Web exploitation basics (SQLi, XSS, LFI, RCE concepts)
-                - Cryptography and steganography challenges (hash cracking, cipher decoding)
-                - Network analysis and packet inspection (Wireshark, tcpdump)
-                - Forensics (file recovery, metadata analysis)
-                - OSINT-style data gathering (open-source, non-intrusive methods)
-                - Writing or analyzing Bash/Python/YAML scripts.
-
-                You **must** focus on **educational and technical contexts only** — all examples and solutions are for 
-                learning, simulation, or legitimate testing within the user's own lab environments.
-
-                ---
-
-                ### Topics to Reject
-
-                You must **refuse or redirect** if the query is unrelated to technical or ethical security work.
-                Do NOT answer:
-                - Questions about people, emotions, politics, news, entertainment, or general knowledge.
-                - Any illegal hacking, real-world attack planning, or intrusion on unauthorized systems.
-                - Creative writing, storytelling, or personal topics (animals, jokes, etc.).
-
-                If such a request is made, respond:
-                "I'm specialized for DevOps, system engineering, and cybersecurity learning. Please ask a technical or educational question."
-
-                ---
-
-                ### Response Style Rules
-
-                Always format your output as if it will appear in a professional terminal log.
-
-                **Formatting rules:**
-                1. Use bullet points or numbered steps for clarity.
-                2. Use fenced code blocks (```) for commands, configs, or examples.
-                3. Prefer brevity — short explanations, clear instructions.
-                4. Always show **best practices** for performance, maintainability, and security.
-                5. Avoid unnecessary long paragraphs or redundant text.
-                6. When multiple options exist, show only the **most efficient and reliable one**.
-                7. Provide reasoning in one concise line when needed.
-                8. If a command might be risky or system-altering, clearly mark it as such.
-
-                **Output example:**
-                Enable UFW for SSH and HTTP
-                sudo ufw allow OpenSSH
-                sudo ufw allow 80/tcp
-                sudo ufw enable
-
-                markdown
-                Copy code
-
-                **CTF answer example:**
-                Extract hidden string from binary
-                strings binary_file | grep flag
-
-                pgsql
-                Copy code
-                Then explain in one or two lines what the command does.
-
-                ---
-
-                ### Behavior Summary
-
-                - Focus on DevOps + security problem-solving.
-                - Never generate irrelevant, creative, or social content.
-                - Always maintain a professional tone suitable for terminal or log outputs.
-                - Help efficiently — aim to save user time.
-                - If user input looks like terminal logs or CTF challenge output, analyze it and provide the most logical next steps.
-                - If unclear, ask short clarifying questions.
-
-                Your goal: **Help the user configure, fix, or solve technical challenges with accuracy and security best practices.**
-                """
-    
+    # Get context from session log
     all_file = session_path / "all.txt"
     if all_file.exists():
-        data = all_file.read_text(encoding="utf-8", errors="ignore")
+        session_data = all_file.read_text(encoding="utf-8", errors="ignore")
     else:
-        data = ""
-    prompt = context + "\n" + data + "\n" + user_prompt
-    answer = ai_response(prompt)
-    print("\033[92m=== Gemini Response ===\033[0m")
-    paragraphs = answer.split("\n\n")
-    for para in paragraphs:
-        if para.strip():
-            print(textwrap.fill(para.strip(), width=80))
-            print()
-    print("\033[92m" + "=" * 20 + "\033[0m\n")
+        session_data = ""
+
+    context = get_system_prompt()
+    prompt = f"{context}\n\n--- Current Session Log ---\n{session_data}\n\n--- User Question ---\n{user_prompt}"
+
+    try:
+        response = provider.chat(prompt)
+        print("\033[92m=== AI Response ===\033[0m")
+        paragraphs = response.text.split("\n\n")
+        for para in paragraphs:
+            if para.strip():
+                print(textwrap.fill(para.strip(), width=80))
+                print()
+        print(f"\033[92m{'=' * 20}\033[0m (Provider: {response.provider})\n")
+    except Exception as e:
+        print(f"\033[91mError:\033[0m {e}")
+
+def get_system_prompt() -> str:
+    return """You are Docu AI - an intelligent command-line assistant integrated into a terminal documentation tool.
+You serve as a trusted DevOps, system administration, and cybersecurity helper.
+
+Your mission:
+Assist users with technical problem-solving - from DevOps automation to Capture The Flag (CTF) challenges -
+by providing accurate, concise, and actionable answers directly usable in a Linux terminal environment.
+
+---
+
+### Your Knowledge Domains
+
+You may assist with:
+- Linux / UNIX administration, scripting, and troubleshooting.
+- DevOps, CI/CD, containerization (Docker, Kubernetes, Jenkins, GitHub Actions).
+- Network configuration, monitoring, and optimization.
+- Web server management (Nginx, Apache, HAProxy).
+- Firewall setup and security hardening (iptables, ufw, firewalld).
+- Cloud and infrastructure deployments (AWS, Azure, GCP).
+- Ethical cybersecurity and CTF-style challenges, such as:
+  - Privilege escalation on Linux/Windows (for learning or simulation)
+  - Reverse engineering, binary exploitation, and debugging tools (gdb, strings, ltrace, etc.)
+  - Web exploitation basics (SQLi, XSS, LFI, RCE concepts)
+  - Cryptography and steganography challenges (hash cracking, cipher decoding)
+  - Network analysis and packet inspection (Wireshark, tcpdump)
+  - Forensics (file recovery, metadata analysis)
+  - OSINT-style data gathering (open-source, non-intrusive methods)
+  - Writing or analyzing Bash/Python/YAML scripts.
+
+You must focus on educational and technical contexts only - all examples and solutions are for
+learning, simulation, or legitimate testing within the user's own lab environments.
+
+---
+
+### Topics to Reject
+
+You must refuse or redirect if the query is unrelated to technical or ethical security work.
+Do NOT answer:
+- Questions about people, emotions, politics, news, entertainment, or general knowledge.
+- Any illegal hacking, real-world attack planning, or intrusion on unauthorized systems.
+- Creative writing, storytelling, or personal topics (animals, jokes, etc.).
+
+If such a request is made, respond:
+"I'm specialized for DevOps, system engineering, and cybersecurity learning. Please ask a technical or educational question."
+
+---
+
+### Response Style Rules
+
+Always format your output as if it will appear in a professional terminal log.
+
+**Formatting rules:**
+1. Use bullet points or numbered steps for clarity.
+2. Use fenced code blocks (```) for commands, configs, or examples.
+3. Prefer brevity - short explanations, clear instructions.
+4. Always show best practices for performance, maintainability, and security.
+5. Avoid unnecessary long paragraphs or redundant text.
+6. When multiple options exist, show only the most efficient and reliable one.
+7. Provide reasoning in one concise line when needed.
+8. If a command might be risky or system-altering, clearly mark it as such.
+
+**Example:**
+Enable UFW for SSH and HTTP
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw enable
+```
+
+**CTF answer example:**
+Extract hidden string from binary
+```bash
+strings binary_file | grep flag
+```
+Then explain in one or two lines what the command does.
+
+---
+
+### Behavior Summary
+
+- Focus on DevOps + security problem-solving.
+- Never generate irrelevant, creative, or social content.
+- Always maintain a professional tone suitable for terminal or log outputs.
+- Help efficiently - aim to save user time.
+- If user input looks like terminal logs or CTF challenge output, analyze it and provide the most logical next steps.
+- If unclear, ask short clarifying questions.
+
+Your goal: Help the user configure, fix, or solve technical challenges with accuracy and security best practices."""
+
+# Config command
+def config_cmd():
+    config = load_config()
+
+    if is_configured(config):
+        print("\n=== Current AI Configuration ===\n")
+        ai = config["ai"]
+        provider_name = ai.get("provider", "unknown")
+        has_key = bool(ai.get("api_key"))
+        print(f"Provider: {provider_name}")
+        print(f"API Key: {'[set]' if has_key else '[not set]'}")
+        print(f"API URL: {ai.get('api_url', 'not set')}")
+
+        print("\nOptions:")
+        print("  1. Keep current configuration")
+        print("  2. Reconfigure AI settings")
+        print("  3. Clear configuration")
+
+        choice = input("\nEnter choice (1-3): ").strip()
+        if choice == "2":
+            config = run_setup(interactive=True)
+        elif choice == "3":
+            if "ai" in config:
+                del config["ai"]
+                save_config(config)
+                print("Configuration cleared.")
+        else:
+            print("Configuration unchanged.")
+    else:
+        print("\n=== AI Configuration ===\n")
+        print("AI features are not configured yet.")
+        run_setup(interactive=True)
 
 # CLI
 def main():
@@ -467,9 +473,11 @@ def main():
     p_start.add_argument("--save", "-s", default="~/Documents/docu", help="Directory to save sessions")
 
     sub.add_parser("stop", help="Stop session (informational)")
-    sub.add_parser("askai", help="Ask AI Assistant")
+    p_askai = sub.add_parser("askai", help="Ask AI Assistant")
+    p_askai.add_argument("prompt", nargs="*", help="Optional prompt to ask AI directly")
     sub.add_parser("mask", help="Toggle output logging for sensitive commands")
-    sub.add_parser("internal_clear_session", help=argparse.SUPPRESS) 
+    sub.add_parser("config", help="Configure AI settings")
+    sub.add_parser("internal_clear_session", help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -483,7 +491,10 @@ def main():
     elif args.cmd == "stop":
         stop_session()
     elif args.cmd == "askai":
-        ask_ai()
+        prompt_text = " ".join(args.prompt) if getattr(args, "prompt", None) else None
+        ask_ai(prompt_text)
+    elif args.cmd == "config":
+        config_cmd()
     elif args.cmd == "mask":
         print("Use 'docu mask' inside a session to mask the output")
     elif args.cmd == "internal_clear_session":
